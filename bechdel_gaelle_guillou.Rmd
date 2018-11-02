@@ -1,0 +1,393 @@
+---
+title: "Bechdel Test Revisited by Movie Gender"
+author: "Gaëlle Guillou"
+date: "10/20/2018"
+output: html_document
+---
+
+### The "progressiveness test"
+
+This "new bechdel test" assignment has inspired me to a new approach to gender distribution in movies. The problem is not only the blatant, factual gender inequality, it is also the way female characters are depicted. Family or romance movies have a greater share of women than will have action or adventure movies. This kind of storyline will perpetuate gender stereotypes which serve as excuses for the movie business to build an unequal distribution.
+
+This new approach will be based on the "progressiveness" of a movie in terms of woman representation. We will first determine the effects of movie genres on the part of the female distribution, then try to predict a "reasonable" level of female distribution according to the expected effect of the genres.
+
+Overall, the goal is to spot the movies that outdid themselves in terms of female representation compared to the industry standards.
+
+### Loading libraries
+
+```{r libraries, message=FALSE}
+# Library import
+
+library(tidyverse)
+library(magrittr)
+library(ggplot2)
+library(readr)
+library(lubridate)
+library(jsonlite)
+library(splitstackshape)
+
+# Setting system locale to get accents
+
+Sys.setlocale(locale="en_US.UTF-8")
+```
+
+### Introducing and loading the datasets
+
+__FiveThirtyEight Dataset__
+
+```{r message=FALSE, warning=FALSE}
+# Loading data
+
+cast_gender <- read_csv("https://raw.githubusercontent.com/fivethirtyeight/data/master/next-bechdel/nextBechdel_castGender.csv")
+
+glimpse(cast_gender)
+```
+
+The current data only provides us insights on distribution of roles in the movies.
+Let's mix it up a little with data about the movies.
+
+__Kaggle's Movie Dataset__
+
+We will be using Kaggle's movie dataset to enrich our current information.
+
+https://www.kaggle.com/rounakbanik/the-movies-dataset/version/7
+
+We will be focusing on the following dataset : movies_metadata.csv
+
+```{r message=FALSE, warning=FALSE}
+movies <- read_csv("movies_metadata.csv")
+
+glimpse(movies)
+```
+
+
+### Data cleaning : Formatting both datasets in similar ways
+
+```{r}
+# We only want our top-50 2016 movies
+# fte refers to Five Thirty Eight
+
+top_50_movies_fte <- unique(cast_gender$MOVIE)
+
+top_50_movies_kaggle <- movies %>% 
+  filter(original_title %in% top_50_movies_fte) %>% 
+  filter(year(release_date) == 2016) %>% 
+  unique() %>% 
+  select(original_title) %>% 
+  arrange(original_title)
+
+# For ease of manipulation, we turn it into a list by ignoring the header
+
+top_50_movies_kaggle <- top_50_movies_kaggle[[1]]
+
+length(top_50_movies_kaggle)
+
+# Unfortunately, only 44 movies seem to have made the cut. Maybe the remaining have typo problems / a different title than in our dataset. Since the dataset is small, we can try to do it manually - otherwise, we could have used regular expressions.
+# I also explored the "agrep" function for approximate matching. It worked when it was a space/accentuation problem, but not when part of the movie title was ommited.
+
+# Here are our 6 missing movies :
+missing_movies <- top_50_movies_fte[!top_50_movies_fte %in% top_50_movies_kaggle]
+
+#"Tyler Perry’s Boo! A Madea Halloween"
+#"Don’t Breathe"                              
+#"Pete’s Dragon"
+#"The Conjuring 2: The Enfield Poltergeist"   
+#"The Divergent Series: Allegiant"
+#"Miss Peregrine’s Home for Peculiar Children"
+
+# Choosing "impactful" words in the title allows us a relatively quick fix for filtering and renaming
+
+movies_filtered <- movies %>% 
+  filter(year(release_date) == 2016) %>% 
+  filter(
+    original_title %in% top_50_movies_fte
+    | str_detect(original_title, "Peregrine")
+    | str_detect(original_title, "Breathe")
+    | str_detect(original_title, "Pete's Dragon")
+    | str_detect(original_title, "Conjuring 2")
+    | str_detect(original_title, "Madea")
+    | str_detect(original_title, "Allegiant")
+    )
+
+# Now comes the redundant filtering
+
+movies_filtered[str_detect(movies_filtered$original_title, "Peregrine"), 9] <- "Miss Peregrine’s Home for Peculiar Children"
+movies_filtered[str_detect(movies_filtered$original_title, "Breathe"), 9] <- "Don’t Breathe"
+movies_filtered[str_detect(movies_filtered$original_title, "Pete's Dragon"), 9] <- "Pete’s Dragon"
+movies_filtered[str_detect(movies_filtered$original_title, "Conjuring 2"), 9] <- "The Conjuring 2: The Enfield Poltergeist"
+movies_filtered[str_detect(movies_filtered$original_title, "Madea"), 9] <- "Tyler Perry’s Boo! A Madea Halloween"
+movies_filtered[str_detect(movies_filtered$original_title, "Allegiant"), 9] <- "The Divergent Series: Allegiant"
+
+# Check if it works
+
+movies_filtered %>% 
+  filter(original_title %in% top_50_movies_fte) 
+
+# And it does !
+```
+
+
+### Exploration : Gender distribution data
+
+The crew gender dataset having been modified (and reduced) since the beginning of the assignment, we choose to focus on the characters and the storytelling.
+
+```{r genderdist}
+cast_gender %>% 
+  filter(GENDER != "Unknown") %>% 
+  group_by(TYPE, GENDER) %>% 
+  summarise(n = n()) %>% 
+  mutate(FREQ = n / sum(n)) %>% 
+  ggplot() +
+  aes(TYPE, FREQ) + 
+  geom_bar(aes(fill = GENDER), position = "dodge", stat = "identity") + 
+  ggtitle("Plot of gender by character type") +
+  xlab("Character Type") + 
+  ylab("% by Gender") +
+  labs(fill = "Gender")
+```
+
+Overall, the gender gap is stronger when considering supporting actors, and lower when considering leading actors. 
+
+### Data cleaning : Combining movie genre and gender distribution data
+
+Assumptions of the following exploration :
+
+ + Because Cameos are rarer and less relevant to the story, we shall choose to ignore them (Cameos are apparitions of actors/personalities in their own names).
+ + Leading and Lead Ensemble Members only differenciate the number of leads. It is not very relevant to our analysis, so let's merge them under Leading.
+
+Now, we aim at creating a dataset that contains dummy columns for the genres and a detailed proportion of female characters.
+
+```{r}
+# We now want the raw numbers to merge them with the movies dataset
+
+# Create a dataset that summarises cast distribution by movie
+
+cast_gender_femalefreq <- cast_gender %>% 
+  filter(GENDER != "Unknown" & TYPE != "Cameo") %>% 
+  group_by(MOVIE, TYPE, GENDER) %>% 
+  summarise(n = n()) %>% 
+  mutate(FREQ = round(n / sum(n), 2)) %>% 
+  select(-n) %>% 
+  spread(key = GENDER, value = FREQ) %>% 
+  select(-Male)
+
+cast_gender_femalefreq[is.na(cast_gender_femalefreq$Female),"Female"] <- 0
+cast_gender_femalefreq[str_detect(cast_gender_femalefreq$TYPE, "Lead Ensemble Member"), "TYPE"] <- "Leading"
+
+cast_gender_summary <- cast_gender_femalefreq %>% 
+  spread(key = TYPE, value = Female)
+
+# Join with our movies dataset
+
+movies_final <- movies_filtered %>% 
+  select(budget, genres, id, original_title, popularity, release_date, revenue, vote_average) %>% 
+  inner_join(cast_gender_summary, by = c("original_title" = "MOVIE")) %>% 
+  rename(lead_female_freq = Leading,
+         supporting_female_freq = Supporting,
+         genres_original = genres) %>% 
+  # Made the choice to equally weigh leads and supporting characters. It wouldn't make sense to weigh it according to the number of people because it doesn't properly represent their screening time. At the same time, it wouldn't be fair to consider supporting characters at 20% of the overall frequency just because of their lesser screening time, because they set the "gender tone". A fairly neutral way of weighing them is therefore 50-50, but I admit that it is an important choice in the process.
+  mutate(overall_female_freq = (lead_female_freq + supporting_female_freq) / 2)
+
+# Parse json and create a cleaned column of the movie's genre
+
+movies_final$genres <- sapply(
+  movies_final$genres_original, 
+  FUN=function(x) paste(
+    fromJSON(
+      str_replace_all(x, "'", '"')
+      )$name, collapse = ","
+    ),
+  USE.NAMES = F
+  )
+
+# Perform a dummy coding on the genres column
+
+movies_dummy <- concat.split.expanded(movies_final, "genres", sep = ',', type = "character", fill = 0, drop = F)
+```
+
+
+
+### Exploration : Genres and their impact on role distribution
+
+A useful way to check the impact of each genre on the proportion is to check the correlation matrix.
+
+```{r}
+movies_regression_data <- movies_dummy %>% 
+  select(overall_female_freq, starts_with("genres_")) %>% 
+  select(-genres_original)
+
+cormat <- cor(movies_regression_data)
+
+corr_freq_female <- rownames_to_column(data.frame(sort(cormat[-1,1])), "genre")
+names(corr_freq_female) <- c("genre", "correlation")
+corr_freq_female$genre <- factor(corr_freq_female$genre, levels = corr_freq_female$genre[order(corr_freq_female$correlation)])
+
+corr_freq_female %>% 
+  ggplot() +
+  aes(genre, correlation) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  ggtitle("Correlation of the percentage of female characters versus movie genres") +
+  xlab("Movie Genre") + 
+  ylab("Correlation with % female characters")
+```
+
+Some results are expected : Romance movies star more women, while War movies star more men. But Horror movies are surprising : their positive effect on female repartition is similar to Romance movies !
+
+Let's explore as well the similarity between genres. We aim at clustering the different genres both in relation to their similarity and their impact on gender distribution, instead of just choosing a cutoff value.
+
+```{r message = FALSE, warning = FALSE}
+# CLUSTERING BASED ON MOVIES SIMILARITY
+
+# Based on http://research.stowers.org/mcm/efg/R/Visualization/cor-cluster/index.htm
+# Limit : our data is not centered
+
+dissimilarity <- 1 - abs(cor(cormat[-1,-1]))
+distance <- as.dist(dissimilarity)
+hc <- hclust(distance)
+
+plot(hc, main="Genres clusters based on dissimilarity")
+
+# We choose 6 clusters because it matches the 2nd rank of nodes
+
+genres_clusters <- rownames_to_column(data.frame(cutree(hc, k = 6)), "genre")
+names(genres_clusters) <- c("genre", "cluster")
+
+genres_clusters_freq <- corr_freq_female %>% 
+  inner_join(genres_clusters) %>% 
+  mutate(cluster = as.character(cluster))
+
+genres_clusters_freq$genre <- factor(
+  genres_clusters_freq$genre, levels = genres_clusters_freq$genre[order(genres_clusters_freq$correlation)]
+  )
+
+genres_clusters_freq %>% 
+  group_by(cluster) %>% 
+  summarise(average_corr = mean(correlation))
+
+# CLUSTERING BASED ON GENDER DIST. IMPACT
+
+# Overall, it seems the influence of each cluster can be "re-clustered" in terms of its impact -> (Strongly) Negative (1,6), (Slightly) Positive (4,5), Neutral (2,3)
+
+genres_clusters_freq %>% 
+  ggplot() +
+  aes(genre, correlation) +
+  geom_col(aes(fill = cluster), position = "dodge", stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  ggtitle("Correlation of the percentage of female characters versus movie genres") +
+  xlab("Movie Genre") + 
+  ylab("Correlation with % female characters") +
+  labs(fill = "Cluster")
+
+# We realise here the 2nd cluster is not that neutral. Let's just split it in 3.
+
+genres_clusters_freq <- genres_clusters_freq %>% 
+  mutate(cluster_gender = case_when(
+    cluster == "1" | cluster == "6" | (cluster == "2" & correlation < - 0.1) ~ "Negative",
+    cluster == "4" | cluster == "5" | (cluster == "2" & correlation > 0.1) ~ "Positive",
+    cluster == "3" | (cluster == "2" & abs(correlation) < 0.1) ~ "Neutral"
+  ))
+
+genres_clusters_freq %>% 
+  ggplot() +
+  aes(genre, correlation) +
+  geom_col(aes(fill = cluster_gender)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  ggtitle("Correlation of the percentage of female characters versus movie genres") +
+  xlab("Movie Genre") + 
+  ylab("Correlation with % female characters") +
+  labs(fill = "Impact on Gender \ndistribution \n(New cluster)")
+
+# There still remains "Drama" and "Crime" labelled as positive while they have a negative/neutral impact. We choose to keep it that way since we decided to focus on the interactions between genres.
+```
+
+Let's now tag our movies as positive / neutral / negative.
+
+```{r}
+negative_genres <- genres_clusters_freq %>% 
+  filter(cluster_gender == "Negative") %>% 
+  select(genre)
+
+neutral_genres <- genres_clusters_freq %>% 
+  filter(cluster_gender == "Neutral") %>% 
+  select(genre)
+
+positive_genres <- genres_clusters_freq %>% 
+  filter(cluster_gender == "Positive") %>% 
+  select(genre)
+
+movies_dummy$negative <- apply(movies_dummy[, colnames(movies_dummy) %in% c(negative_genres)$genre], 1, function(x) sum(x))
+movies_dummy$neutral <- apply(movies_dummy[, colnames(movies_dummy) %in% c(neutral_genres)$genre], 1, function(x) sum(x))
+movies_dummy$positive <- apply(movies_dummy[, colnames(movies_dummy) %in% c(positive_genres)$genre], 1, function(x) sum(x))
+
+cor(
+  movies_dummy %>% 
+    select(overall_female_freq, negative, neutral, positive)
+)
+
+# Looks coherent !
+
+# Now let's create a score to account for the amount of positive / neutral / negative influences
+movies_dummy$genre_score <- (movies_dummy$positive - movies_dummy$negative) / (movies_dummy$positive + movies_dummy$neutral + movies_dummy$negative)
+```
+
+### Implementing the "progressiveness" test
+
+We're working on a progressivity index. So we want to see if the movie has outdone itself compared to what its genre score predicts.
+
+```{r}
+
+reg <- lm(overall_female_freq ~ genre_score, data = movies_dummy)
+
+summary(reg)
+
+# TEST
+
+movies_dummy$test = movies_dummy$overall_female_freq > predict(reg)
+
+summary(movies_dummy$test)
+
+movies_dummy %>% 
+  ggplot() +
+  aes(genre_score, overall_female_freq) +
+  geom_point(aes(colour = factor(test))) +
+  geom_smooth(method='lm') +
+  labs(colour = "Passed the test ?") +
+  ggtitle("Test realization") +
+  xlab("Genre Score") +
+  ylab("% of Female")
+```
+
+_Interpretation of the "Genre Score" : the closer it is to 1, the more the movies' genres have a positive effect on female distribution. The closer it is to -1, the more the movies' genres have a negative effect on female distribution._
+
+Because of our (biased) method, we have a 50/50 result. It doesn't really matter, because what was important was to notice the movies that were progressive, which implies some sort of middle cutoff.
+
+```{r}
+# Some progressive movies
+
+movies_dummy %>% 
+  filter(test == T) %>% 
+  select(original_title, overall_female_freq, genres, genre_score) %>% 
+  head()
+
+# Some less progressive movies
+
+movies_dummy %>% 
+  filter(test == F) %>% 
+  select(original_title, overall_female_freq, genres, genre_score) %>% 
+  head()
+```
+
+
+### Conclusion : Strengths and Limitations of this test
+
+__Strength :__
+
++ This test accounts well for movies that make an effort in their genre, a variable often hard to manipulate and take into account.
+
+__Limits :__
+
++ The training set is the same as the one where we perform the test - it is obviously strongly biased.
++ The genre score and clusters could be built in other ways - there are strong assumptions.
++ It looks a lot like a mean and the test, a simple above and under mean. However, the complexity of the genre score outweighs this simplicity.
++ We should not see it as an unilateral test, but consider the fact that men should be as represented as women in "female movies". For instance, we should not want men to be underrepresented in romance movies, and that "progressiveness" test does not account well for it.
